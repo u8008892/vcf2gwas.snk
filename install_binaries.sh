@@ -23,6 +23,10 @@ curl -LO https://github.com/shenwei356/csvtk/releases/download/v0.32.0/csvtk_lin
 tar xf csvtk_linux_amd64.tar.gz
 mv csvtk ../bin/
 
+curl -LO https://github.com/kdm9/schnelLFMM/releases/download/v0.2.1/schnellfmm-linux-x86_64.tar.gz
+tar xf schnellfmm-linux-x86_64.tar.gz
+mv schnellfmm ../bin/
+
 cd ..
 rm -rf tmp
 ls bin

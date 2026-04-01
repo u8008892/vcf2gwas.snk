@@ -117,8 +117,10 @@ rule all:
         WD("tmp/genotypes"),
         WD("tmp/grm.cXX.txt"),
         expand(WD("out/{pheno}.assoc.txt"), pheno=PHENOS),
-        expand(WD("out/{pheno}.manhattan.png"), pheno=PHENOS),
+        expand(WD("out/gemma_{pheno}.manhattan.png"), pheno=PHENOS),
+        expand(WD("out/lfmm_{pheno}.manhattan.png"), pheno=PHENOS),
         WD("out/trait_pves.tsv"),
+        WD("out/lfmm2_out.tsv"),
 
 rule plinksubsetfile:
     output:
@@ -206,13 +208,42 @@ rule lmm:
         "   -n {params.phenoi}"
         ") >{output.log} 2>&1"
 
-rule plotr:
+rule lfmm:
+    input:
+        bfile=WD("tmp/genotypes.bed"),
+        fam=WD("tmp/genotypes.fam"),
+        pheno=config["phenotypes"]
+    output:
+        stats=WD("out/lfmm2_out.tsv"),
+        summary=WD("out/lfmm2_out.summary.txt")
+    params:
+        k=config.get("lfmm_k", 12),
+        dir=lambda wc, input, output: Path(output.stats).parent
+    shell:
+        "schnellfmm"
+        "   -b {input.bfile}"
+        "   -c {input.pheno}"
+        "   -k {params.k}"
+        "   -o {params.dir}/lfmm2_out"
+
+rule plot_gemma:
     input:
         assoc=WD("out/{pheno}.assoc.txt"),
     output:
-        assoc=WD("out/{pheno}.manhattan.png"),
+        WD("out/gemma_{pheno}.manhattan.png"),
     shell:
         "Rscript scripts/plot_gemma.R --output {output} {input}"
+        
+rule plot_lfmm:
+    input:
+        assoc=WD("out/lfmm2_out.tsv"),
+    output:
+        WD("out/lfmm_{pheno}.manhattan.png"),
+    shell:
+        "Rscript scripts/plot_lfmm.R"
+        "   --pval p_{wildcards.pheno}"
+        "   --output {output}"
+        "   {input}"
 
 rule heritability_table:
     input:
