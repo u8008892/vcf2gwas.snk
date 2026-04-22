@@ -1,0 +1,215 @@
+---
+title: "GWAS Results — vcf2gwas"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: hide
+params:
+  results_dir: "out/"   # folder containing normalized {tool}_{pheno}.tsv files
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 14, fig.height = 5)
+library(tidyverse)
+library(ggrepel)
+library(patchwork)
+```
+
+---
+
+## Configuration
+
+```{r config}
+results_dir <- params$results_dir
+
+# Discover all normalized result files
+files <- tibble(path = list.files(results_dir, pattern = "^(gemma|lfmm)_.+\\.tsv$", full.names = TRUE)) %>%
+  mutate(
+    filename = basename(path),
+    tool     = str_extract(filename, "^[^_]+"),
+    pheno    = str_replace(filename, "^[^_]+_(.+)\\.tsv$", "\\1")
+  )
+
+phenos <- unique(files$pheno)
+tools  <- unique(files$tool)
+
+cat("Found", nrow(files), "result files\n")
+cat("Phenotypes:", paste(phenos, collapse = ", "), "\n")
+cat("Tools:     ", paste(tools,  collapse = ", "), "\n")
+```
+
+---
+
+## Helper functions
+
+```{r helpers}
+# Colour palette — extend if more tools are added
+TOOL_COLOURS <- c(gemma = "#2166ac", lfmm = "#d6604d")
+
+# Alternating chromosome colours (dark/light per tool, handled via alpha in overlaid plot)
+CHR_PALETTE <- rep(c("#4d4d4d", "#bababa"), 20)
+
+read_results <- function(pheno_name) {
+  files %>%
+    filter(pheno == pheno_name) %>%
+    rowwise() %>%
+    reframe(read_tsv(path, show_col_types = FALSE) %>% mutate(tool = tool)) %>%
+    mutate(chr = as.integer(chr)) %>%
+    filter(!is.na(p_value), p_value > 0)
+}
+
+# Add cumulative genomic position for Manhattan x-axis
+add_cumpos <- function(df) {
+  chr_lengths <- df %>%
+    group_by(chr) %>%
+    summarise(max_pos = max(pos), .groups = "drop") %>%
+    arrange(chr) %>%
+    mutate(offset = lag(cumsum(max_pos), default = 0))
+
+  df %>%
+    left_join(chr_lengths, by = "chr") %>%
+    mutate(cum_pos = pos + offset)
+}
+
+# Chromosome midpoints for x-axis labels
+chr_mids <- function(df) {
+  df %>%
+    group_by(chr) %>%
+    summarise(mid = mean(range(cum_pos)), .groups = "drop")
+}
+
+# Bonferroni and suggestive thresholds
+thresholds <- function(df) {
+  n <- nrow(df) / length(unique(df$tool))   # per-tool SNP count
+  list(
+    bonf = -log10(0.05 / n),
+    sugg = -log10(1 / n)
+  )
+}
+
+# QQ plot for one tool/pheno slice
+qq_plot <- function(df, tool_name, pheno_name) {
+  d <- df %>% filter(tool == tool_name) %>%
+    arrange(p_value) %>%
+    mutate(
+      observed = -log10(p_value),
+      expected = -log10(ppoints(n()))
+    )
+  thr <- thresholds(df)
+  lambda <- median(qchisq(1 - d$p_value, 1)) / qchisq(0.5, 1)
+
+  ggplot(d, aes(x = expected, y = observed)) +
+    geom_abline(slope = 1, intercept = 0, colour = "black", linewidth = 0.5) +
+    geom_hline(yintercept = thr$bonf, colour = "#e31a1c", linetype = "dashed", linewidth = 0.4) +
+    geom_hline(yintercept = thr$sugg, colour = "#1f78b4", linetype = "dashed", linewidth = 0.4) +
+    geom_point(colour = TOOL_COLOURS[tool_name], alpha = 0.6, size = 0.8) +
+    labs(
+      title = glue::glue("QQ — {tool_name}  |  λ = {round(lambda, 3)}"),
+      x = "Expected  –log₁₀(p)",
+      y = "Observed  –log₁₀(p)"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(plot.title = element_text(size = 10))
+}
+
+# Single-tool Manhattan (used inside faceted plot)
+manhattan_single <- function(d_tool, tool_name, thr, mids, highlight_snps = NULL) {
+  d_tool <- d_tool %>%
+    mutate(
+      nlp      = -log10(p_value),
+      col_grp  = factor(chr %% 2),
+      sig      = nlp >= thr$bonf,
+      top_hit  = if (!is.null(highlight_snps)) snp_id %in% highlight_snps else sig
+    )
+
+  p <- ggplot(d_tool, aes(x = cum_pos, y = nlp)) +
+    geom_point(aes(colour = col_grp), alpha = 0.5, size = 0.4, show.legend = FALSE) +
+    scale_colour_manual(values = c("0" = "#4d9e6e", "1" = "#2a6041")) +
+    geom_hline(yintercept = thr$bonf, colour = "#e31a1c", linetype = "dashed", linewidth = 0.4) +
+    geom_hline(yintercept = thr$sugg, colour = "#1f78b4", linetype = "dashed", linewidth = 0.4) +
+    geom_point(data = filter(d_tool, sig), aes(colour = col_grp), size = 1.5, show.legend = FALSE) +
+    scale_x_continuous(labels = mids$chr, breaks = mids$mid, expand = c(0.01, 0)) +
+    labs(x = NULL, y = "–log₁₀(p)", title = tool_name) +
+    theme_bw(base_size = 11) +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor   = element_blank(),
+      axis.text.x        = element_text(size = 8),
+      plot.title         = element_text(size = 10, face = "bold", hjust = 1),
+      strip.placement    = "outside"
+    )
+  p
+}
+```
+
+---
+
+```{r plots, results='asis', fig.width=16, fig.height=6}
+for (ph in phenos) {
+  cat(glue::glue("\n\n## {ph}\n\n"))
+
+  df_all <- read_results(ph) %>% add_cumpos()
+  mids   <- chr_mids(df_all)
+  thr    <- thresholds(df_all)
+
+  # ---- 1. Overlaid multi-tool Manhattan ----------------------------------
+  cat("\n\n### Combined Manhattan\n\n")
+
+  p_overlay <- df_all %>%
+    mutate(nlp = -log10(p_value), col_grp = factor(chr %% 2)) %>%
+    ggplot(aes(x = cum_pos, y = nlp, colour = tool)) +
+    geom_point(alpha = 0.4, size = 0.4) +
+    scale_colour_manual(values = TOOL_COLOURS, name = "Tool") +
+    geom_hline(yintercept = thr$bonf, colour = "#e31a1c", linetype = "dashed", linewidth = 0.4) +
+    geom_hline(yintercept = thr$sugg, colour = "#1f78b4", linetype = "dashed", linewidth = 0.4) +
+    scale_x_continuous(labels = mids$chr, breaks = mids$mid, expand = c(0.01, 0)) +
+    labs(
+      title = glue::glue("{ph} — all tools"),
+      x = "Chromosome", y = "–log₁₀(p)"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor   = element_blank(),
+      legend.position    = "bottom"
+    )
+
+  print(p_overlay)
+
+  # ---- 2. Faceted Manhattan + QQ -----------------------------------------
+  cat("\n\n### Faceted Manhattan + QQ\n\n")
+
+  man_plots <- map(tools, function(tl) {
+    d_tool <- df_all %>% filter(tool == tl)
+    manhattan_single(d_tool, tl, thr, mids)
+  })
+
+  qq_plots <- map(tools, function(tl) {
+    qq_plot(df_all, tl, ph)
+  })
+
+  # Pair each Manhattan with its QQ using patchwork, stack tool rows
+  rows <- map2(man_plots, qq_plots, function(m, q) {
+    m + q + plot_layout(widths = c(4, 1))
+  })
+
+  combined <- wrap_plots(rows, ncol = 1) +
+    plot_annotation(title = ph, theme = theme(plot.title = element_text(size = 13, face = "bold")))
+
+  print(combined)
+
+  # ---- 3. Per-tool QQ plots ----------------------------------------------
+  cat("\n\n### QQ Plots\n\n")
+
+  qq_combined <- wrap_plots(qq_plots, nrow = 1) +
+    plot_annotation(title = glue::glue("{ph} — QQ plots"))
+
+  print(qq_combined)
+
+  cat("\n\n---\n\n")
+}
+```

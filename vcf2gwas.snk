@@ -1,7 +1,7 @@
 #-----------------------------------------------------------------------
 #-                    VCF2GWAS (snakemake edition)                     -
 #-----------------------------------------------------------------------
-# This file is not user-servicble, all settings are configured via the config file.
+# This file is not user-serviceable, all settings are configured via the config file.
 
 from sys import exit
 import csv
@@ -20,7 +20,7 @@ def dictshuffle(d):
     v = list(d.values())
     random.shuffle(v)
     return dict(zip(k, v))
-    
+
 
 class Phenotypes:
     def __init__(self, xsvfile):
@@ -50,7 +50,6 @@ class Phenotypes:
             self.phenos.update({
                 f"PERM{i}_{k}": dictshuffle(v) for k, v in orig.items()
             })
-
 
     def write_pheno(self, file, iorder=None, porder=None):
         if iorder is None:
@@ -85,17 +84,17 @@ class Geno:
                 if line.startswith("##contig="):
                     chrom = re.search(r"ID=([^,]+)[,>]", line)
                     if chrom:
-                        chrom = chrom.group(1)  # Extract the first match
+                        chrom = chrom.group(1)
                     length = re.search(r"length=(\d+)[,>]", line)
                     if length:
-                        length = int(length.group(1))  # Convert the first match to an integer
+                        length = int(length.group(1))
                     if chrom:
                         self.chroms[chrom] = length
                 if line.startswith("#CHROM"):
                     self.indivs = line.rstrip().split("\t")[9:]
 
 
-PHENOTYPES=Phenotypes( config["phenotypes"] )
+PHENOTYPES = Phenotypes(config["phenotypes"])
 INDS = PHENOTYPES.indivs
 PHENOS = list(PHENOTYPES.phenos)
 GENO = Geno(config["vcf"])
@@ -117,10 +116,13 @@ rule all:
         WD("tmp/genotypes"),
         WD("tmp/grm.cXX.txt"),
         expand(WD("out/{pheno}.assoc.txt"), pheno=PHENOS),
-        expand(WD("out/gemma_{pheno}.manhattan.png"), pheno=PHENOS),
-        expand(WD("out/lfmm_{pheno}.manhattan.png"), pheno=PHENOS),
+        expand(WD("out/{tool}_{pheno}.tsv"),
+            tool=config.get("tools", ["lfmm", "gemma"]),
+            pheno=PHENOS),
         WD("out/trait_pves.tsv"),
-        WD("out/lfmm2_out.tsv"),
+        WD("out/lfmm2_out.tsv") if "lfmm" in config.get("tools", []) else [],
+        WD("out/gwas_plots.html"),
+
 
 rule plinksubsetfile:
     output:
@@ -139,7 +141,7 @@ rule vcf2plink:
         badfam=WD("tmp/genotypes.badfam"),
         prefix=WD("tmp/genotypes"),
     threads: 1
-    log: 
+    log:
         WD("tmp/genotypes.bed.log")
     params:
         missing_threshold=config["missing_threshold"],
@@ -148,7 +150,7 @@ rule vcf2plink:
         "   --vcf {input.vcf}"
         "   --out {output.prefix}"
         "   --set-missing-var-ids '@:#'"
-        "   --mind {params.missing_threshold}" # max indiv missing rate
+        "   --mind {params.missing_threshold}"
         "   --keep {input.samples}"
         "   --allow-extra-chr"
         "   --allow-no-sex"
@@ -164,7 +166,7 @@ rule vcf2plink:
 rule update_fam:
     input:
         fam=WD("tmp/genotypes.badfam"),
-        pheno= config["phenotypes"] ,
+        pheno=config["phenotypes"],
     output:
         fam=WD("tmp/genotypes.fam"),
     run:
@@ -218,43 +220,80 @@ rule lfmm:
         summary=WD("out/lfmm2_out.summary.txt")
     params:
         k=config.get("lfmm_k", 12),
-        dir=lambda wc, input, output: Path(output.stats).parent
+        dir=lambda wc, input, output: Path(output.stats).parent,
+        out_prefix=lambda wc, input, output: output.stats.replace(".tsv", "")
+    threads: 8
+    resources:
+        mem_mb=16000
     shell:
         "schnellfmm"
         "   -b {input.bfile}"
         "   -c {input.pheno}"
         "   -k {params.k}"
-        "   -o {params.dir}/lfmm2_out"
+        "   -t {threads}"
+        "   -o {params.out_prefix}"
 
-rule plot_gemma:
+rule normalize_gemma:
     input:
         assoc=WD("out/{pheno}.assoc.txt"),
     output:
-        WD("out/gemma_{pheno}.manhattan.png"),
-    shell:
-        "Rscript scripts/plot_gemma.R --output {output} {input}"
-        
-rule plot_lfmm:
+        WD("out/gemma_{pheno}.tsv"),
+    run:
+        import pandas as pd
+        df = pd.read_csv(input.assoc, sep="\t")
+        df = df.rename(columns={
+            "rs":     "snp_id",
+            "ps":     "pos",
+            "p_wald": "p_value",
+        })
+        df[["chr", "pos", "snp_id", "p_value", "beta"]].to_csv(output[0], sep="\t", index=False)
+
+rule normalize_lfmm:
     input:
-        assoc=WD("out/lfmm2_out.tsv"),
+        stats=WD("out/lfmm2_out.tsv"),
     output:
-        WD("out/lfmm_{pheno}.manhattan.png"),
+        WD("out/lfmm_{pheno}.tsv"),
+    run:
+        import pandas as pd
+        pheno = wildcards.pheno
+        df = pd.read_csv(input.stats, sep="\t")
+        df = df.rename(columns={
+            f"p_{pheno}":    "p_value",
+            f"beta_{pheno}": "beta",
+        })
+        df[["chr", "pos", "snp_id", "p_value", "beta"]].to_csv(output[0], sep="\t", index=False)
+
+rule render_notebook:
+    input:
+        notebook="scripts/gwas_plots.Rmd",
+        tsv=expand(WD("out/{tool}_{pheno}.tsv"),
+            tool=config.get("tools", ["lfmm", "gemma"]),
+            pheno=PHENOS),
+    output:
+        WD("out/gwas_plots.html"),
+    params:
+        results_dir=lambda wc, input, output: str(Path(output[0]).parent.resolve()),
+        outfile=lambda wc, input, output: Path(output[0]).name,
+        outdir=lambda wc, input, output: str(Path(output[0]).parent.resolve()),
     shell:
-        "Rscript scripts/plot_lfmm.R"
-        "   --pval p_{wildcards.pheno}"
-        "   --output {output}"
-        "   {input}"
+        "Rscript -e \""
+        "  rmarkdown::render("
+        "    '{input.notebook}',"
+        "    params=list(results_dir='{params.results_dir}/'),"
+        "    output_file='{params.outfile}',"
+        "    output_dir='{params.outdir}'"
+        "  )\""
 
 rule heritability_table:
     input:
         expand(WD("out/{pheno}.gemma.log"), pheno=PHENOS),
     output: WD("out/trait_pves.tsv")
     run:
-        pves = {}        
+        pves = {}
         for logfile in input:
-            pheno = re.sub(r".*/(.+)\.assoc.txt", r"\1", logfile)
-            pve=""
-            sepve=""
+            pheno = re.sub(r".*/(.+)\.gemma\.log", r"\1", logfile)
+            pve = ""
+            sepve = ""
             with open(logfile, encoding="utf-8") as fh:
                 for line in fh:
                     m = re.search(r"pve estimate =([0-9.e-]+)", line.rstrip())
@@ -270,7 +309,7 @@ rule heritability_table:
                 print(pheno, pve, sepve, sep="\t", file=fh)
 
 
-# Copyright 2024-2025 Kevin Murray/Gekkonid Scientific Pty. Ltd. 
+# Copyright 2024-2025 Kevin Murray/Gekkonid Scientific Pty. Ltd.
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.

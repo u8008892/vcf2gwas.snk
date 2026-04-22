@@ -1,3 +1,4 @@
 .opt
 .snakemake
 v2g_wd_sim
+GWAS_results

@@ -27,6 +27,10 @@ curl -LO https://github.com/kdm9/schnelLFMM/releases/download/v0.2.1/schnellfmm-
 tar xf schnellfmm-linux-x86_64.tar.gz
 mv schnellfmm ../bin/
 
+curl -LO https://github.com/jgm/pandoc/releases/download/3.1.11/pandoc-3.1.11-linux-amd64.tar.gz
+tar xf pandoc-3.1.11-linux-amd64.tar.gz
+mv pandoc-3.1.11/bin/pandoc ../bin/
+
 cd ..
 rm -rf tmp
 ls bin
